@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 
 use esp32_nimble::{
     enums::*,
@@ -6,24 +6,22 @@ use esp32_nimble::{
     BLEAdvertisementData, BLEDevice, NimbleProperties,
 };
 
-use log::info;
+use log::{error, info};
+use esp_idf_svc::hal::cpu::Core;
 
-use esp_idf_hal::adc::config::Config;
-use esp_idf_hal::adc::*;
-use esp_idf_hal::peripherals::Peripherals;
+pub mod adc_reader;
+pub mod thread;
 
 fn main() -> anyhow::Result<()> {
-    esp_idf_sys::link_patches();
+    esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
 
-    let peripherals = Peripherals::take()?;
-    let mut adc = AdcDriver::new(peripherals.adc1, &Config::new().calibration(true))?;
-    let mut adc_pin: esp_idf_hal::adc::AdcChannelDriver<{ attenuation::DB_11 }, _> =
-        AdcChannelDriver::new(peripherals.pins.gpio36)?;
+    let (sender, receiver) = mpsc::sync_channel::<u16>(20);
+    let sender = Arc::new(Mutex::new(sender));
+    let receiver = Arc::new(Mutex::new(receiver));
 
     let ble_device = BLEDevice::take();
     let ble_advertiser = ble_device.get_advertising();
-
     ble_device
         .security()
         .set_auth(AuthReq::all())
@@ -40,7 +38,6 @@ fn main() -> anyhow::Result<()> {
             info!("Disconnecting client");
             server.disconnect(client_desc.conn_handle()).unwrap();
         }
-
         if !client_desc.bonded() {
             info!("Client not bonded");
         }
@@ -56,33 +53,35 @@ fn main() -> anyhow::Result<()> {
 
     let service = server.create_service(BleUuid::Uuid16(0xABCD));
 
-    let secure_characteristic = service.lock().create_characteristic(
+    let start_measurement_characteristic = service.lock().create_characteristic(
         BleUuid::Uuid16(0x1235),
-        NimbleProperties::READ | NimbleProperties::READ_ENC | NimbleProperties::READ_AUTHOR,
+        NimbleProperties::WRITE | NimbleProperties::WRITE_ENC | NimbleProperties::WRITE_AUTHOR,
     );
-
-    secure_characteristic
-        .lock()
-        .set_value("try to bond".as_bytes());
-
-    let allow_notify = Arc::new(Mutex::new(false));
-    let allow_notify_clone = Arc::clone(&allow_notify);
+    start_measurement_characteristic.lock().on_write(|args| {
+        info!(
+            "Wrote to writable characteristic: {:?} -> {:?}",
+            std::str::from_utf8(args.current_data()).unwrap(),
+            args.recv_data().to_ascii_lowercase()
+        );
+    });
 
     let notify_characteristic = service
         .lock()
         .create_characteristic(BleUuid::Uuid16(0x1234), NimbleProperties::NOTIFY);
+
     notify_characteristic
         .lock()
-        .on_subscribe(move |_characteristic, conn_desc, sub_event| {
-            // Sprawdź, czy urządzenie jest sparowane
-            let mut allow_notify = allow_notify_clone.lock();
-
+        .on_subscribe(move |_characteristic, conn_desc, _sub_event| {
             if conn_desc.bonded() {
-                println!("Subscribed: {:?}", sub_event);
-                *allow_notify = true;
+                let sender = Arc::clone(&sender);
+                let _worker = thread::spawn(Core::Core1, move || {
+                    let sender_guard = sender.lock();
+                    if let Err(e) = adc_reader::adc_read(&*sender_guard) {
+                        error!("Error reading ADC: {:?}", e);
+                    }
+                });
             } else {
-                println!("Not bonded");
-                *allow_notify = false;
+                info!("Not bonded");
             }
         });
 
@@ -95,16 +94,15 @@ fn main() -> anyhow::Result<()> {
 
     info!("bonded_addresses: {:?}", ble_device.bonded_addresses());
 
-    
     loop {
-        esp_idf_hal::delay::FreeRtos::delay_ms(1000);
-        let allow_notify = allow_notify.lock();
-        if *allow_notify {
-            let value = adc.read(&mut adc_pin)?;
-            notify_characteristic
-                .lock()
-                .set_value(&value.to_le_bytes())
-                .notify();
-        }
+        esp_idf_svc::hal::delay::FreeRtos::delay_ms(400);
+        let receiver_guard = receiver.lock();        
+        let value = receiver_guard.recv().unwrap();
+        info!("Received value: {}", value);
+
+        notify_characteristic
+            .lock()
+            .set_value(&value.to_le_bytes())
+            .notify();
     }
 }

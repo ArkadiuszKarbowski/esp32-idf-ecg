@@ -1,5 +1,5 @@
 [package]
-name = "esp32-nimble-ecg"
+name = "esp32-idf-ecg"
 version = "0.1.0"
 authors = ["Arkadiusz Karbowski <arkadiusz.karbowski.99@gmail.com>"]
 edition = "2021"
@@ -7,7 +7,7 @@ resolver = "2"
 rust-version = "1.71"
 
 [[bin]]
-name = "esp32-nimble-ecg"
+name = "esp32-idf-ecg"
 harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors
 
 [profile.release]
@@ -29,11 +29,9 @@ embassy = ["esp-idf-svc/embassy-sync", "esp-idf-svc/critical-section", "esp-idf-
 
 [dependencies]
 log = { version = "0.4", default-features = false }
-esp-idf-svc = { version = "0.48", default-features = false }
+esp-idf-svc = { version = "0.48.1"}
 esp32-nimble = "0.6.1"
-esp-idf-sys = "0.34.1"
 anyhow = "1"
-esp-idf-hal = "0.43.0"
 
 [build-dependencies]
 embuild = "0.31.3"
