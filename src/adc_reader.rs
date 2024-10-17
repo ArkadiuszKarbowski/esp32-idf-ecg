@@ -1,41 +1,32 @@
 use esp_idf_svc::hal::{
-    adc::{AdcChannelDriver, AdcDriver},
-    peripherals::Peripherals,
-    adc::config::Config,
-    adc::attenuation,
+    adc::{AdcChannelDriver, AdcDriver, ADC1},
+    gpio::Gpio36,
 };
+use log::debug;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::SyncSender;
+use std::sync::Arc;
 
-pub fn adc_read(sender: &SyncSender<u16>) -> anyhow::Result<()> {
-    let peripherals = match Peripherals::take() {
-        Ok(peripherals) => peripherals,
-        Err(e) => {
-            return Err(e.into());
-        }
-    };
-    let mut adc = match AdcDriver::new(peripherals.adc1, &Config::new().calibration(true)) {
-        Ok(adc) => adc,
-        Err(e) => {
-            return Err(e.into());
-        }
-    };
-    let mut adc_pin: AdcChannelDriver<{ attenuation::DB_11 }, _> =
-        match AdcChannelDriver::new(peripherals.pins.gpio36) {
-            Ok(adc_pin) => adc_pin,
-            Err(e) => {
-                return Err(e.into());
-            }
-        };
 
-    loop {
+pub fn adc_read(sender: &SyncSender<u16>, running: Arc<AtomicBool>, adc: &mut AdcDriver<ADC1>, adc_pin: &mut AdcChannelDriver<3, Gpio36>) -> anyhow::Result<()> {
+    
+    while running.load(Ordering::Relaxed) {
         esp_idf_svc::hal::delay::FreeRtos::delay_ms(500);
 
-        let value = match adc.read(&mut adc_pin) {
-            Ok(value) => value,
+        match adc.read(adc_pin) {
+            Ok(value) => {
+                if let Err(e) = sender.send(value) {
+                    debug!(target:"adc", "Failed to send ADC value: {:?}", e);
+                    break;
+                }
+            }
             Err(e) => {
+                debug!(target:"adc", "Failed to read ADC: {:?}", e);
                 return Err(e.into());
             }
         };
-        sender.send(value).unwrap();
     }
+    
+    debug!(target:"adc", "ADC read loop finished");
+    Ok(())
 }
